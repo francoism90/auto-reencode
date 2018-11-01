@@ -2,108 +2,105 @@
 # Run in the dir containing the target files you wish to convert to x264.
 # There are no arguments.
 # The script will copy both the audio and video bitrates into the new file
-# via metadata from mediainfo and will retain the original DTS for you.
+# via metadata from ffprobe.
 
 export BLD="\e[01m" RED="\e[01;31m" BLU="\e[01;34m" NRM="\e[00m"
+export TMP='/tmp/auto-reencode' BIT_VIDEO=4000 BIT_AUDIO=128
+export FFMPEG_BIN='/usr/bin/ffmpeg'
+export FFPROBE_BIN='/usr/bin/ffprobe'
 
-command -v ffmpeg >/dev/null 2>&1 || {
+command -v ${FFMPEG_BIN} >/dev/null 2>&1 || {
 echo -e "${BLD}${RED}I require ffmpeg but it's not installed. Aborting.${NRM}" >&2
 exit 1; }
 
-command -v mediainfo >/dev/null 2>&1 || {
-echo "${BLD}${RED}I require mediainfo but it's not installed. Aborting.${NRM}" >&2
+command -v ${FFPROBE_BIN} >/dev/null 2>&1 || {
+echo "${BLD}${RED}I require ffprobe but it's not installed. Aborting.${NRM}" >&2
 exit 1; }
 
 report() {
   echo -e "${BLD}${RED}Task $n of $total${NRM}"
-  echo -e "${BLD} file to encode    :${BLU} ${file%.*}"|sed 's|./||'
-  echo -e "${NRM}${BLD} video bitrate     : $vkbps kbps${NRM}"
-  echo -e "${BLD} audio bitrate     : $akbps kbps${NRM}"
-  echo -e "${BLD} play time         : $ptime${NRM}"
+  echo -e "${BLD} file to encode         : ${BLU}${file}${NRM}"
+  echo -e "${BLD} video bitrate          : $vkbps kbps${NRM}"
+  echo -e "${BLD} audio bitrate          : $akbps kbps${NRM}"
+  echo -e "${BLD} play time              : $ptime${NRM}"
 }
 
-pass1() {
-  # For syntax, see: https://trac.ffmpeg.org/wiki/Encode/H.264
+encode() {
+  filename=$(basename -- "$file")
+  basename=${filename%.*}
 
-  nice -19 ffmpeg -v quiet -stats -y -i "${file}" \
-    -c:v libx264 -preset slow -b:v "$vkbps"k -pass 1 \
-    -passlogfile "$logfile" \
-    -c:a aac -b:a "$akbps"k -f mp4 /dev/null
+  # https://trac.ffmpeg.org/wiki/Encode/H.264
+  # https://trac.ffmpeg.org/wiki/Hardware/VAAPI
+  # https://trac.ffmpeg.org/wiki/EncodingForStreamingSites
+  mkdir -p ${TMP} && ${FFMPEG_BIN} \
+    -v quiet \
+    -stats \
+    -init_hw_device vaapi=intelgpu:/dev/dri/renderD128 \
+    -hwaccel vaapi \
+    -hwaccel_output_format vaapi \
+    -hwaccel_device intelgpu \
+    -i "${file}" \
+    -filter_hw_device intelgpu \
+    -vf 'format=nv12|vaapi,hwupload' \
+    -c:v h264_vaapi \
+    -bf 3 \
+    -b:v "${vkbps}"k \
+    -maxrate "${vkbps}"k \
+    -profile:v high \
+    -level 5.1 \
+    -threads 0 \
+    -c:a libfdk_aac \
+    -b:a "${akbps}"k \
+    -c:s mov_text \
+    -movflags +faststart \
+    -f mp4 "${TMP}/${basename}.m4v";
+
+    mv "${TMP}/${basename}.m4v" .
 }
 
-pass2() {
-  nice -19 ffmpeg -v quiet -stats -i "${file}" -c:v libx264 \
-    -preset slow -b:v "$vkbps"k -pass 2 \
-    -passlogfile "$logfile" \
-    -c:a aac -b:a "$akbps"k "${file%.*}.mp4"
-
-  # remove the 1st pass log and mbtree files
-  rm -f "$logfile"*
-}
-
-if df -T /tmp | grep -m 1 -q tmpfs; then
-  # /tmp is tmpfs so use it for the mbtree and log files
-  logfile=/tmp/auto-reencode_ffmpeg2pass
-else
-  # /tmp is not tmpfs so just writeout mbtree and logs in the working dir
-  logfile=auto-reencode_ffmpeg2pass
-fi
-
-IFS=$'\012'
-echo 'Enter target file extension [flv,wmv,asf]:'
-read -r EXT
-
-# check for files to work on and exit if not are found
-if [[ -z $(find . ! -name . -prune -type f -name "*.$EXT" 2>/dev/null) ]]; then
-  EXT="flv"
-  if [[ -z $(find . ! -name . -prune -type f -name "*.$EXT" 2>/dev/null) ]]; then
-    EXT="wmv"
-    if [[ -z $(find . ! -name . -prune -type f -name "*.$EXT" 2>/dev/null) ]]; then
-      EXT="asf"
-      if [[ -z $(find . ! -name . -prune -type f -name "*.$EXT" 2>/dev/null) ]]; then
-        echo -e "${BLD}Cannot find any target files so no work to do.${NRM}"
-        echo -e "${BLD}Define a target file type in this dirtree and try again.${NRM}"
-        exit 1
-      fi
-    fi
-  fi
-fi
-
-[[ -z "$EXT" ]] && EXT="flv"
-
-total=$(find . ! -name . -prune -type f -name "*.$EXT"|wc -l)
 n=0
-for file in $(find . ! -name . -prune -type f -name "*.$EXT"); do
+mapfile -t files < <(find $PWD/* -name '*.avi' -o -name '*.mp4' -o -name '*.wmv' -o -name '*.mkv')
+total=${#files[@]}
 
-  # find bitrate for video and audio
-  vkbps=$(( $(mediainfo --inform="Video;%BitRate%" "$file") / 1000))
-  akbps=$(( $(mediainfo --inform="Audio;%BitRate%" "$file") / 1000))
-  ptime=$(mediainfo --inform="General;%Duration/String2%" "$file")
-  n=$(( n + 1 ))
+for file in "${files[@]}"; do
+    # do not overwrite existing files
+    if [[ -e "${file%.*}.m4v" ]]; then
+      echo >&2 Output file already exists: "${file%.*}.m4v"
+      echo >&2 Skipping...
+      echo >&2
+      continue
+    fi
 
-  report
+    vkbps=$(${FFPROBE_BIN} -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
+    akbps=$(${FFPROBE_BIN} -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
+    ptime=$(${FFPROBE_BIN} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}")
+    n=$((n + 1))
 
-  # do not overwrite existing files
-  if [[ -e "${file%.*}.mp4" ]]; then
-    echo >&2 Output file already exists: "${file%.*}.mp4"
-    echo >&2 Skipping...
-    echo >&2
-    continue
-  fi
+    if [ ${vkbps} == "N/A" ] || [ ${vkbps} -lt 0 ]; then
+        # Base video bitrate of filesize
+        filesize=$(du -m "${file}" | awk '{print $1}')
+        vkbps=$(echo "(${filesize} * 8192) / (${ptime} + 0.5) / 1" | bc)
+    else
+        vkbps=$(echo "${vkbps} / 1000" | bc)
+    fi
 
-  # encode
-  echo -e "${BLD} pass 1 of 2 stats : ${NRM}"
+    # Video bitrate over limit
+    if [ ${vkbps} -gt ${BIT_VIDEO} ]; then
+        vkbps="${BIT_VIDEO}"
+    fi
 
-  if pass1; then
-    echo -e "${BLD} pass 2 of 2 stats : ${NRM}"
-    pass2
-  else
-    echo -e "${BLD}${RED} Pass 1 failed, exiting!${NRM}"
-    exit 1
-  fi
+    if [ ${akbps} == "N/A" ] || [ ${akbps} -lt 0] || [ ${akbps} / 1000 -gt ${BIT_AUDIO} ]; then
+        akbps="${BIT_AUDIO}"
+    else
+        akbps=$(echo "${akbps} / 1000" | bc)
+    fi
 
-  # restore dts
-  touch -r "$file" "${file%.*}.mp4"
+    report
+
+    # encode video
+    if encode; then
+        echo -e "${BLD} Encoding done${NRM}"
+    else
+        echo -e "${BLD}${RED} Encoding failed${NRM}"
+    fi
 done
-
-# vim:set ts=2 sw=2 et:

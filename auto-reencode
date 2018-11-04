@@ -84,15 +84,20 @@ for file in "${files[@]}"; do
         vkbps=$(echo "${vkbps} / 1000" | bc)
     fi
 
+    if [ ${akbps} == "N/A" ] || [ ${akbps} -lt 0 ]; then
+        akbps="${BIT_AUDIO}"
+    else
+        akbps=$(echo "${akbps} / 1000" | bc)
+    fi
+
     # Video bitrate over limit
     if [ ${vkbps} -gt ${BIT_VIDEO} ]; then
         vkbps="${BIT_VIDEO}"
     fi
 
-    if [ ${akbps} == "N/A" ] || [ ${akbps} -lt 0] || [ ${akbps} / 1000 -gt ${BIT_AUDIO} ]; then
-        akbps="${BIT_AUDIO}"
-    else
-        akbps=$(echo "${akbps} / 1000" | bc)
+    # Audio bitrate over limit
+    if [ ${akbps} -gt ${BIT_AUDIO} ]; then
+       akbps="${BIT_AUDIO}"
     fi
 
     report

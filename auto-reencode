@@ -10,106 +10,108 @@ export FFMPEG_BIN='/usr/bin/ffmpeg'
 export FFPROBE_BIN='/usr/bin/ffprobe'
 
 command -v ${FFMPEG_BIN} >/dev/null 2>&1 || {
-	echo -e "${BLD}${RED}I require ffmpeg but it's not installed. Aborting.${NRM}" >&2
-	exit 1
+  echo -e "${BLD}${RED}I require ffmpeg but it's not installed. Aborting.${NRM}" >&2
+  exit 1
 }
 
 command -v ${FFPROBE_BIN} >/dev/null 2>&1 || {
-	echo "${BLD}${RED}I require ffprobe but it's not installed. Aborting.${NRM}" >&2
-	exit 1
+  echo "${BLD}${RED}I require ffprobe but it's not installed. Aborting.${NRM}" >&2
+  exit 1
 }
 
 report() {
-	echo -e "${BLD}${CYA}Task $n of $total${NRM}"
-	echo -e "${BLD} file to encode         : ${BLU}${file}${NRM}"
-	echo -e "${BLD} video bitrate          : $vkbps kbps${NRM}"
-	echo -e "${BLD} audio bitrate          : $akbps kbps${NRM}"
-	echo -e "${BLD} play time (seconds)    : $ptime${NRM}"
+  echo -e "${BLD}${CYA}Task $n of $total${NRM}"
+  echo -e "${BLD} file to encode         : ${BLU}${file}${NRM}"
+  echo -e "${BLD} current filesize       : ${fsize} MB${NRM}"
+  echo -e "${BLD} video bitrate          : $vkbps kbps${NRM}"
+  echo -e "${BLD} audio bitrate          : $akbps kbps${NRM}"
+  echo -e "${BLD} play time              : $ptime secs${NRM}"
 }
 
 encode() {
-	filename=$(basename -- "$file")
-	basename=${filename%.*}
+  filename=$(basename -- "$file")
+  basename=${filename%.*}
 
-	# https://trac.ffmpeg.org/wiki/Encode/H.264
-	# https://trac.ffmpeg.org/wiki/Hardware/VAAPI
-	# https://trac.ffmpeg.org/wiki/EncodingForStreamingSites
-	mkdir -p ${TMP} && ${FFMPEG_BIN} \
-		-y \
-		-v quiet \
-		-stats \
-		-init_hw_device vaapi=intelgpu:/dev/dri/renderD128 \
-		-hwaccel vaapi \
-		-hwaccel_output_format vaapi \
-		-hwaccel_device intelgpu \
-		-i "${file}" \
-		-filter_hw_device intelgpu \
-		-vf 'format=nv12|vaapi,hwupload' \
-		-c:v h264_vaapi \
-		-bf -1 \
-		-b:v "${vkbps}"k \
-		-maxrate "${vkbps}"k \
-		-profile:v high \
-		-level 5.1 \
-		-threads 0 \
-		-c:a libfdk_aac \
-		-b:a "${akbps}"k \
-		-c:s mov_text \
-		-movflags +faststart \
-		-f mp4 "${TMP}/${basename}.m4v"
+  # https://trac.ffmpeg.org/wiki/Encode/H.264
+  # https://trac.ffmpeg.org/wiki/Hardware/VAAPI
+  # https://trac.ffmpeg.org/wiki/EncodingForStreamingSites
+  mkdir -p ${TMP} && ${FFMPEG_BIN} \
+    -y \
+    -v fatal \
+    -stats \
+    -init_hw_device vaapi=intelgpu:/dev/dri/renderD128 \
+    -hwaccel vaapi \
+    -hwaccel_output_format vaapi \
+    -hwaccel_device intelgpu \
+    -i "${file}" \
+    -filter_hw_device intelgpu \
+    -vf 'format=nv12|vaapi,hwupload' \
+    -c:v h264_vaapi \
+    -bf -1 \
+    -b:v "${vkbps}"k \
+    -maxrate "${vkbps}"k \
+    -profile:v high \
+    -level 5.1 \
+    -threads 0 \
+    -c:a libfdk_aac \
+    -b:a "${akbps}"k \
+    -c:s mov_text \
+    -movflags +faststart \
+    -f mp4 "${TMP}/${basename}.m4v"
 
-	mv "${TMP}/${basename}.m4v" "${PWD}/".
+  mv "${TMP}/${basename}.m4v" "${PWD}/".
 }
 
 n=0
-mapfile -t files < <(find "${PWD}/"* -name '*.avi' -o -name '*.mp4' -o -name '*.wmv' -o -name '*.mkv' -o -name '*.flv')
+mapfile -t files < <(find "${PWD}/"* -name '*.avi' -o -name '*.mp4' -o -name '*.wmv' -o -name '*.mkv' -o -name '*.flv' -o -name '*.mov')
 total=${#files[@]}
 
 for file in "${files[@]}"; do
-	n=$((n + 1))
+  n=$((n + 1))
 
-	vkbps=$(${FFPROBE_BIN} -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
-	akbps=$(${FFPROBE_BIN} -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
-	ptime=$(${FFPROBE_BIN} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}")
+  vkbps=$(${FFPROBE_BIN} -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
+  akbps=$(${FFPROBE_BIN} -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
+  ptime=$(${FFPROBE_BIN} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}")
+  fsize=$(du -m "${file}" | awk '{print $1}')
+        
 
-	if [ ${vkbps} == "N/A" ] || [ ${vkbps} -lt 0 ]; then
-		# Base video bitrate of filesize when unable to get bitrate
-		filesize=$(du -m "${file}" | awk '{print $1}')
-		vkbps=$(echo "(${filesize} * 8192) / (${ptime} + 0.5) / 1" | bc)
-	else
-		vkbps=$(echo "${vkbps} / 1000" | bc)
-	fi
+  if [ ${vkbps} == "N/A" ] || [ ${vkbps} -lt 0 ]; then
+    # Base video bitrate of filesize when unable to get bitrate
+    vkbps=$(echo "(${fsize} * 8192) / (${ptime} + 0.5) / 1" | bc)
+  else
+    vkbps=$(echo "${vkbps} / 1000" | bc)
+  fi
 
-	if [ ${akbps} == "N/A" ] || [ ${akbps} -lt 0 ]; then
-		akbps="${BIT_AUDIO}"
-	else
-		akbps=$(echo "${akbps} / 1000" | bc)
-	fi
+  if [ ${akbps} == "N/A" ] || [ ${akbps} -lt 0 ]; then
+    akbps="${BIT_AUDIO}"
+  else
+    akbps=$(echo "${akbps} / 1000" | bc)
+  fi
 
-	report
+  report
 
-	# do not overwrite existing files
-	if [[ -e "${file%.*}.m4v" ]]; then
-		echo -e "${BLD}${RED} File already exists: ${file%.*}.m4v${NRM}"
-		continue
-	fi
+  # do not overwrite existing files
+  if [[ -e "${file%.*}.m4v" ]]; then
+    echo -e "${BLD}${RED} File already exists: ${file%.*}.m4v${NRM}"
+    continue
+  fi
 
-	# Video bitrate over limit
-	if [ ${vkbps} -gt ${BIT_VIDEO} ]; then
-		echo -e "${BLD} adjusted video bitrate : $vkbps kbps => ${BIT_VIDEO} kbps${NRM}"
-		vkbps="${BIT_VIDEO}"
-	fi
+  # Video bitrate over limit
+  if [ ${vkbps} -gt ${BIT_VIDEO} ]; then
+    vkbps="${BIT_VIDEO}"
+    echo -e "${BLD} adjusted video bitrate : ${vkbps} kbps${NRM}"
+  fi
 
-	# Audio bitrate over limit
-	if [ ${akbps} -gt ${BIT_AUDIO} ]; then
-		echo -e "${BLD} adjusted audio bitrate : $akbps kbps => ${BIT_AUDIO} kbps${NRM}"
-		akbps="${BIT_AUDIO}"
-	fi
+  # Audio bitrate over limit
+  if [ ${akbps} -gt ${BIT_AUDIO} ]; then
+    akbps="${BIT_AUDIO}"
+    echo -e "${BLD} adjusted audio bitrate : ${akbps} kbps${NRM}"
+  fi
 
-	# encode video
-	if encode; then
-		echo -e "${BLD} Encoding done${NRM}"
-	else
-		echo -e "${BLD}${RED} Encoding failed${NRM}"
-	fi
+  # encode video
+  if encode; then
+    echo -e "${BLD} Encoding done${NRM}"
+  else
+    echo -e "${BLD}${RED} Encoding failed${NRM}"
+  fi
 done

@@ -73,7 +73,6 @@ for file in "${files[@]}"; do
   akbps=$(${FFPROBE_BIN} -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
   ptime=$(${FFPROBE_BIN} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}")
   fsize=$(du -m "${file}" | awk '{print $1}')
-        
 
   if [ ${vkbps} == "N/A" ] || [ ${vkbps} -lt 0 ]; then
     # Base video bitrate of filesize when unable to get bitrate

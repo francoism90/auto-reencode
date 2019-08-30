@@ -1,6 +1,6 @@
 # Auto-reencode
 ### Purpose
-Mass convert lesser known formats such as asd, flv, and wmv to mp4 contained x264 files using ffmpeg.
+Mass convert lesser known formats such as asd, flv, and wmv to mp4 contained h264 files using ffmpeg.
 * Retains file's original bitrates (audio/video) with limits by setting `BIT_VIDEO` and `BIT_AUDIO`.
 * Functions recursively automatically.
 * Use ramdisk (`/tmp`) to speedup encoding.

@@ -7,9 +7,9 @@
 
 export BLD="\e[01m" RED="\e[01;31m" BLU="\e[01;34m" CYA="\e[01;36m" NRM="\e[00m"
 export PATH_TEMP='/tmp/auto-reencode'
-export CPU_LIMIT=50
 export BIT_VIDEO=6500
 export BIT_AUDIO=128
+export CPU_LIMIT=50
 
 command -v cpulimit >/dev/null 2>&1 || {
   echo -e "${BLD}${RED}cpulimit not installed. Aborting.${NRM}" >&2
@@ -96,7 +96,7 @@ for file in "${files[@]}"; do
     continue
   fi
 
-  # paths
+  # set path
   filename=$(basename -- "$file")
   basename=${filename%.*}
   logfile="${PATH_TEMP}/ffmpeg2pass"
@@ -136,10 +136,10 @@ for file in "${files[@]}"; do
     echo -e "${BLD} use audio bitrate: ${akbps} kbps${NRM}"
   fi
 
-  # cpu threads
+  # get cpu threads
   threads=$(nproc --all)
 
-  # create process path
+  # create temp path
   mkdir -p ${PATH_TEMP}
 
   # encode

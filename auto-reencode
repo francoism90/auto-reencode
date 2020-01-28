@@ -1,26 +1,28 @@
 #!/bin/bash
 
 # https://trac.ffmpeg.org/wiki/Encode/H.264
-# https://trac.ffmpeg.org/wiki/Hardware/VAAPI
-# https://trac.ffmpeg.org/wiki/EncodingForStreamingSites
 #
 # Run in the dir containing the target files you wish to convert to x264.
 # There are no arguments.
-# The script will copy both the audio and video bitrates into the new file
-# via metadata from ffprobe.
 
 export BLD="\e[01m" RED="\e[01;31m" BLU="\e[01;34m" CYA="\e[01;36m" NRM="\e[00m"
 export PATH_TEMP='/tmp/auto-reencode'
+export CPU_LIMIT=50
 export BIT_VIDEO=6500
 export BIT_AUDIO=128
 
+command -v cpulimit >/dev/null 2>&1 || {
+  echo -e "${BLD}${RED}cpulimit not installed. Aborting.${NRM}" >&2
+  exit 1
+}
+
 command -v ffmpeg >/dev/null 2>&1 || {
-  echo -e "${BLD}${RED}I require ffmpeg but it's not installed. Aborting.${NRM}" >&2
+  echo -e "${BLD}${RED}ffmpeg not installed. Aborting.${NRM}" >&2
   exit 1
 }
 
 command -v ffprobe >/dev/null 2>&1 || {
-  echo -e "${BLD}${RED}I require ffmpeg but it's not installed. Aborting.${NRM}" >&2
+  echo -e "${BLD}${RED}ffprobe not installed. Aborting.${NRM}" >&2
   exit 1
 }
 
@@ -33,38 +35,55 @@ report() {
   echo -e "${BLD} play time              : $ptime secs${NRM}"
 }
 
-encode() {
-  filename=$(basename -- "$file")
-  basename=${filename%.*}
-
-  mkdir -p ${PATH_TEMP} && ffmpeg \
+pass1() {
+  cpulimit -i -z -l $((${CPU_LIMIT} * ${threads})) ffmpeg \
+    -nostdin \
     -y \
-    -v fatal \
+    -v warning \
     -stats \
-    -init_hw_device vaapi=intelgpu:/dev/dri/renderD128 \
-    -hwaccel vaapi \
-    -hwaccel_output_format vaapi \
-    -hwaccel_device intelgpu \
     -i "${file}" \
-    -filter_hw_device intelgpu \
-    -vf 'format=nv12|vaapi,hwupload' \
-    -c:v h264_vaapi \
-    -bf 2 \
-    -b:v "${vkbps}"k \
-    -maxrate "${BIT_VIDEO}"k \
+    -threads ${threads} \
+    -c:v libx264 \
+    -preset slow \
     -profile:v high \
     -level 5.1 \
-    -threads 0 \
-    -c:a libfdk_aac \
+    -b:v "${vkbps}"k \
+    -pix_fmt yuv420p \
+    -pass 1 \
+    -passlogfile "${logfile}" \
+    -an \
+    -f mp4 /dev/null
+}
+
+pass2() {
+  cpulimit -i -z -l $((${CPU_LIMIT} * ${threads})) ffmpeg \
+    -nostdin \
+    -y \
+    -v warning \
+    -stats \
+    -i "${file}" \
+    -threads ${threads} \
+    -c:v libx264 \
+    -preset slow \
+    -profile:v high \
+    -level 5.1 \
+    -b:v "${vkbps}"k \
+    -pix_fmt yuv420p \
+    -pass 2 \
+    -passlogfile "${logfile}" \
+    -c:a aac \
     -b:a "${akbps}"k \
     -c:s mov_text \
     -movflags +faststart \
-    -f mp4 "${PATH_TEMP}/${basename}.m4v"
+    -f mp4 "${PATH_TEMP}/${basename}.m4v" 
 
   mv "${PATH_TEMP}/${basename}.m4v" "${PWD}/".
+
+  # remove the 1st pass log and mbtree files
+  rm -f "$logfile"*
 }
 
-mapfile -t files < <(find "${PWD}/"* -name '*.avi' -o -name '*.mp4' -o -name '*.wmv' -o -name '*.mkv' -o -name '*.flv' -o -name '*.mov')
+mapfile -t files < <(find "${PWD}/"* -name '*.avi' -o -name '*.mp4' -o -name '*.wmv' -o -name '*.mkv' -o -name '*.flv' -o -name '*.mov' -o -name '*.ogm')
 
 total=${#files[@]}
 
@@ -77,16 +96,24 @@ for file in "${files[@]}"; do
     continue
   fi
 
-  #  probe auto/video bitrate
+  # paths
+  filename=$(basename -- "$file")
+  basename=${filename%.*}
+  logfile="${PATH_TEMP}/ffmpeg2pass"
+
+  # probe auto/video bitrate
   _vkbps=$(ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
   _akbps=$(ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "${file}")
+
+  # probe duration and filesize
   ptime=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}")
   fsize=$(du -m "${file}" | awk '{print $1}')
 
+  # calculate audio/video bitrate
   if [[ "$_vkbps" =~ ^-?[0-9]+$ ]]; then
     vkbps=$(echo "${_vkbps} / 1000" | bc)
   else
-    # Base video bitrate of filesize when unable to probe bitrate
+    # base video bitrate of filesize when unable to probe bitrate
     vkbps=$(echo "(${fsize} * 8192) / (${ptime} + 0.5) / 1" | bc)
   fi
 
@@ -98,22 +125,30 @@ for file in "${files[@]}"; do
 
   report
 
-  # Video bitrate over limit
+  # bitrate limits
   if [[ ${vkbps} -gt ${BIT_VIDEO} ]]; then
     vkbps="${BIT_VIDEO}"
-    echo -e "${BLD} use video maxrate: ${vkbps} kbps${NRM}"
+    echo -e "${BLD} use video bitrate: ${vkbps} kbps${NRM}"
   fi
 
-  # Audio bitrate over limit
   if [[ ${akbps} -gt ${BIT_AUDIO} ]]; then
     akbps="${BIT_AUDIO}"
     echo -e "${BLD} use audio bitrate: ${akbps} kbps${NRM}"
   fi
 
-  # encode video
-  if encode; then
-    echo -e "${BLD} Encoding done${NRM}"
+  # cpu threads
+  threads=$(nproc --all)
+
+  # create process path
+  mkdir -p ${PATH_TEMP}
+
+  # encode
+  echo -e "${BLD} pass 1 of 2 stats:${NRM}"
+
+  if pass1; then
+    echo -e "${BLD} pass 2 of 2 stats:${NRM}"
+    pass2
   else
-    echo -e "${BLD}${RED} Encoding failed${NRM}"
+    echo -e "${BLD}${RED} Pass 1 failed, exiting!${NRM}"
   fi
 done
